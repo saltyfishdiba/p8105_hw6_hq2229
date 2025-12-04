@@ -1,0 +1,427 @@
+---
+title: "P8105 Homework 5"
+output: github_document
+date: "2025-11-27 Hantang Qin"
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+library(tidyverse)
+library(modelr)
+library(broom)
+library(forcats)
+library(p8105.datasets)
+```
+
+---
+
+## Problem 1
+
+### Data cleaning
+
+```{r}
+homicide_df = 
+  read.csv("homicide-data.csv") %>% 
+janitor::clean_names() %>% 
+  mutate(
+    city_state = paste(city , state, sep = ", "),
+    solve_status = case_match(
+      disposition,
+      "Closed without arrest" ~ 0,
+      "Open/No arrest" ~ 0,
+      "Closed by arrest" ~ 1
+    ),
+    victim_age = as.numeric(victim_age)
+  ) %>% 
+  filter(
+    !(city_state %in% c("Dallas, TX", "Phoenix, AZ",  "Kansas City, MO", "Tulsa, AL")),
+    victim_race %in% c("White", "Black")
+  ) 
+```
+
+### Baltimore: logistic regression and adjusted OR (male vs female)
+
+```{r}
+homicides_md =
+  homicide_df %>%  
+  filter(
+    city_state == "Baltimore, MD"
+  )
+
+fit_md = 
+  homicides_md |> 
+  glm(
+    solve_status ~ victim_age + victim_sex + victim_race, 
+    family = binomial(), 
+    data = _) 
+```
+```{r}
+result =
+  broom::tidy(fit_md, conf.int = TRUE, exponentiate = TRUE)
+result %>%  
+  knitr::kable()
+result %>%  
+  filter(term == "victim_sexMale") |> 
+  select(term, estimate, conf.low, conf.high) |> 
+  knitr::kable()
+```
+
+Interpreting the exponentiated logistic regression coefficient, the odds ratio for male versus female victims is about 0.42, meaning that, after adjusting for the other variables, male victims have roughly 58% lower odds of having their homicide solved than female victims. The corresponding 95% confidence interval for this odds ratio is approximately 0.32 to 0.56.
+
+
+### Fit models for all cities and extract ORs
+
+```{r}
+fit_cities = function(df){
+  glm(
+    solve_status ~ victim_age + victim_sex + victim_race, 
+    family = binomial(link = "logit"), 
+    data = df) 
+}
+
+
+w_results = 
+  homicide_df %>% 
+  nest(data = -city_state) %>% 
+  mutate(
+    fits = purrr::map(data, fit_cities),
+    results = purrr::map(fits, ~broom::tidy(.x, conf.int = TRUE, exponentiate = TRUE))
+
+  ) %>%  
+  select(city_state, results) %>% 
+  unnest(results) %>%  
+  filter(term == "victim_sexMale") %>% 
+  select(city_state, estimate, conf.low, conf.high) 
+
+
+knitr::kable(w_results)
+```
+
+### Plot of ORs and CIs by city
+
+```{r}
+w_results %>%
+  mutate(city_state = fct_reorder(city_state, estimate)) %>%
+  ggplot(aes(x = city_state, y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.3) +
+  geom_hline(yintercept = 1, color = "red", linewidth = 0.4) +
+  coord_flip() +
+  labs(
+    x = "City",
+    y = "Adjusted OR (Male vs Female)",
+    title = "Adjusted OR with 95% CI for Solving Homicides by City"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8, margin = margin(r = 4))
+  )
+```
+
+
+From the plot, the reference line at OR = 1 helps show which sex is more likely to have their case solved. In cities like Albuquerque, Stockton, Fresno, and Nashville, the ORs are above 1, suggesting that homicides involving male victims are more likely to be solved, although the wide confidence intervals there mean these estimates are quite uncertain. In cities where the 95% confidence interval crosses 1, we don’t have strong statistical evidence that clearance rates differ by victim sex. By contrast, in cities such as Memphis, Jacksonville, Houston, New Orleans, Detroit, Oakland, and New York, the ORs are below 1 and their confidence intervals stay below 1, indicating that cases with female victims are more likely to be solved than those with male victims.
+
+---
+
+## Problem 2
+
+
+```{r}
+set.seed(123)
+
+data("weather_df")
+
+# function to draw a bootstrap sample
+boot_sample = function(df) {
+  df %>% sample_frac(replace = TRUE)
+}
+
+# function to compute the beta ratio for specified terms
+beta_ratio_fun = function(tidy_df, b1 = "tmin", b2 = "prcp") {
+  b1_hat = tidy_df %>% filter(term == b1) %>% pull(estimate)
+  b2_hat = tidy_df %>% filter(term == b2) %>% pull(estimate)
+  as.numeric(b1_hat / b2_hat)
+}
+```
+
+### Bootstrap procedure
+
+```{r}
+n_boot = 5000
+
+boot_results = 
+  tibble(iter = 1:n_boot) %>% 
+  mutate(
+    boot_df = map(iter, function(i) boot_sample(weather_df)),
+    model   = map(boot_df, function(df) lm(tmax ~ tmin + prcp, data = df)),
+    glance  = map(model, glance),
+    tidy    = map(model, tidy),
+    r2        = map_dbl(glance, "r.squared"),
+    beta_ratio = map_dbl(tidy, beta_ratio_fun)
+  ) %>% 
+  select(iter, r2, beta_ratio)
+
+head(boot_results)
+```
+
+### Distribution of R² and beta ratio
+
+```{r}
+r2_plot = 
+  boot_results %>% 
+  ggplot(aes(x = r2)) +
+  geom_histogram(
+    bins  = 40,
+    fill  = "skyblue",
+    color = "white"
+  ) +
+  labs(
+    x = "R²",
+    title = "Bootstrap distribution of R²"
+  ) +
+  theme_minimal()
+
+br_plot = 
+  boot_results %>% 
+  ggplot(aes(x = beta_ratio)) +
+  geom_histogram(
+    bins  = 40,
+    fill  = "orchid",
+    color = "white"
+  ) +
+  labs(
+    x = expression(beta[tmin] / beta[prcp]),
+    title = "Bootstrap distribution of beta ratio"
+  ) +
+  theme_minimal()
+
+r2_plot
+br_plot
+```
+
+### Bootstrap confidence intervals
+
+```{r}
+boot_ci = 
+  boot_results %>% 
+  summarise(
+    r2_low   = quantile(r2, 0.025),
+    r2_high  = quantile(r2, 0.975),
+    br_low   = quantile(beta_ratio, 0.025),
+    br_high  = quantile(beta_ratio, 0.975)
+  )
+
+boot_ci
+```
+
+
+ The bootstrap distribution of R² is roughly symmetric and bell-shaped (maybe slightly left-skewed). Overall it looks reasonably close to normal.
+ The distribution of the beta ratio is highly skewed with a sharp peak and a long tail. This clearly doesn’t look normal, so a normal-based approximation for the beta ratio would be questionable.
+
+---
+
+## Problem 3
+
+### Data cleaning
+
+```{r}
+birthweight_raw = 
+  read_csv("https://p8105.com/data/birthweight.csv")
+
+bw_df = 
+  birthweight_raw %>% 
+  janitor::clean_names() %>% 
+  mutate(
+    babysex = factor(babysex, labels = c("male", "female")),
+    malform = factor(malform, labels = c("absent", "present")),
+    frace   = factor(frace),
+    mrace   = factor(mrace)
+  ) %>% 
+  drop_na()
+```
+
+Check imbalance in some binary / count variables:
+
+```{r}
+bw_df %>%
+select(parity, pnumlbw, pnumsga) %>%
+pivot_longer(
+everything(),
+names_to  = "variable",
+values_to = "value"
+) %>%
+group_by(variable) %>%
+summarise(
+prop_zero = mean(value == 0)
+)
+
+```
+
+These variables are almost always zero and don’t add much information, so I’ll remove them:
+
+```{r}
+bw_df =
+  bw_df %>%
+  select(-any_of(c("parity", "pnumlbw", "pnumgsa", "pnumsga")))
+
+```
+
+Quick look at numeric variables:
+
+```{r}
+bw_df %>% 
+  select(where(is.numeric)) %>% 
+  pivot_longer(
+    everything(),
+    names_to  = "variable",
+    values_to = "value"
+  ) %>% 
+  ggplot(aes(x = value)) +
+  geom_histogram(
+    bins = 30,
+    fill = "lightgray",
+    color = "white"
+  ) +
+  facet_wrap(~ variable, scales = "free") +
+  theme_bw()
+```
+
+### Proposed model for birthweight
+
+```{r}
+mod_main = 
+  lm(
+    bwt ~ blength + bhead + gaweeks + delwt + 
+      babysex + mheight + mrace + wtgain + smoken,
+    data = bw_df
+  )
+
+summary(mod_main)
+```
+
+### Residual diagnostics
+
+```{r}
+bw_df %>% 
+  add_predictions(mod_main) %>% 
+  add_residuals(mod_main) %>% 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.3, color = "steelblue") +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs fitted values for birthweight model"
+  ) +
+  theme_minimal()
+```
+
+
+To build a regression model for birthweight, I first looked for predictors that either had serious imbalance (for example, variables that were almost always zero) or were clearly redundant. Variables such as `parity`, `pnumlbw`, and `pnumgsa` were extremely sparse, so I removed them.
+
+Then, based on both domain knowledge and exploratory plots, I included predictors that are biologically or clinically connected to birthweight: gestational age (`gaweeks`), baby’s length and head circumference at birth (`blength`, `bhead`), maternal delivery weight and height (`delwt`, `mheight`), maternal weight gain (`wtgain`), smoking during pregnancy (`smoken`), baby’s sex (`babysex`), and mother’s race (`mrace`).
+
+The residual plot shows residuals centered around zero with no obvious strong pattern. The spread of residuals gets somewhat larger for higher fitted values, suggesting some mild heteroskedasticity, but nothing extreme.
+
+---
+
+### Model comparison via cross–validation
+
+1. **Model 1 (my chosen model)**
+   `bwt ~ blength + bhead + gaweeks + delwt + babysex + mheight + mrace + wtgain + smoken`
+
+2. **Model 2 (simple model)**
+   `bwt ~ blength + gaweeks`
+
+3. **Model 3 (interaction–heavy model)**
+   `bwt ~ bhead * blength * babysex`
+
+```{r}
+set.seed(234)
+
+cv_df = 
+  crossv_mc(bw_df, n = 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test  = map(test,  as_tibble)
+  ) %>% 
+  mutate(
+    m1 = map(
+      train,
+      function(df) {
+        lm(
+          bwt ~ blength + bhead + gaweeks + delwt + 
+            babysex + mheight + mrace + wtgain + smoken,
+          data = df
+        )
+      }
+    ),
+    m2 = map(
+      train,
+      function(df) {
+        lm(
+          bwt ~ blength + gaweeks,
+          data = df
+        )
+      }
+    ),
+    m3 = map(
+      train,
+      function(df) {
+        lm(
+          bwt ~ bhead * blength * babysex,
+          data = df
+        )
+      }
+    )
+  ) %>% 
+  mutate(
+    rmse_m1 = map2_dbl(m1, test, function(mod, df) rmse(model = mod, data = df)),
+    rmse_m2 = map2_dbl(m2, test, function(mod, df) rmse(model = mod, data = df)),
+    rmse_m3 = map2_dbl(m3, test, function(mod, df) rmse(model = mod, data = df))
+  )
+```
+
+### RMSE comparison
+
+```{r}
+cv_df %>% 
+  select(starts_with("rmse_")) %>% 
+  pivot_longer(
+    everything(),
+    names_to  = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) +
+  geom_violin(fill = "skyblue", color = "gray30") +
+  labs(
+    x = "Model",
+    y = "RMSE",
+    title = "Cross–validated RMSE for three birthweight models"
+  ) +
+  theme_minimal()
+```
+```{r}
+cv_df %>%
+  summarize(
+    RMSE_prop  = mean(rmse_m1),
+    RMSE_Main  = mean(rmse_m2),
+    RMSE_Inter = mean(rmse_m3)
+  ) %>%
+  knitr::kable(digits = 2)
+
+```
+
+
+The violin plot shows the RMSE distributions across 100 cross-validation splits for each model. The proposed model (Model 1), which includes fetal measurements, key maternal variables, and infant sex, has the lowest average RMSE (273.54). The interaction model (Model 3) has a higher average RMSE (289.01), and the simple model (Model 2) is worst (334.19). This pattern suggests that the proposed model gives the best predictive performance while keeping model complexity at a reasonable level.
+
+
